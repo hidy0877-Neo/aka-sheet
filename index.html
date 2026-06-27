@@ -109,15 +109,15 @@
   <div class="controls" id="cameraControls">
     <button id="startBtn">カメラを起動</button>
     <button id="shutterBtn" class="shutter hidden">● 撮影</button>
-    <p class="hint">背面カメラで、オレンジ/赤のペンで書いた答えを撮ってください</p>
+    <p class="hint">背面カメラで、赤・オレンジ・青のマーカーで塗った箇所を撮ってください</p>
   </div>
 
   <!-- 撮影後のコントロール -->
   <div class="controls hidden" id="resultControls">
     <div class="slider-box">
-      <label><span>検出する赤の感度</span><span id="sensVal"></span></label>
+      <label><span>検出する色の感度（赤・青マーカー）</span><span id="sensVal"></span></label>
       <input type="range" id="sensitivity" min="8" max="55" value="22">
-      <p class="hint">赤を取りこぼす→左へ / 余計な所まで隠れる→右へ</p>
+      <p class="hint">取りこぼす→左へ / 余計な所まで隠れる→右へ</p>
     </div>
     <div class="row">
       <button id="selectBtn" class="secondary">範囲を選択</button>
@@ -237,8 +237,10 @@
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   }
 
-  // ---- 赤〜オレンジ画素の判定（HSV方式）----
-  function isWarm(r, g, b, satMin) {
+  // ---- マーカー画素の判定（HSV方式）----
+  // 赤〜オレンジ、または青マーカーの色相帯を拾う。
+  // 彩度・明度が低い画素（紙・黒文字・影）と、青緑(シアン=見出し帯)は除外する。
+  function isTarget(r, g, b, satMin) {
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
     const v = max / 255;
     if (v < 0.18) return false;                   // 暗すぎ（黒・濃い影）は除外
@@ -251,7 +253,9 @@
     else if (max === g) h = 60 * ((b - r) / delta + 2);
     else                h = 60 * ((r - g) / delta + 4);
     if (h < 0) h += 360;
-    return h <= 45 || h >= 335;                   // 赤〜オレンジの色相帯
+    if (h <= 45 || h >= 335) return true;         // 赤〜オレンジ
+    if (h >= 200 && h <= 250) return true;        // 青マーカー（シアン180〜200は除外）
+    return false;
   }
 
   // ---- 近い矩形をグループ化（Union-Find）----
@@ -318,7 +322,7 @@
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         const p = y * w + x, i = p * 4;
-        if (isWarm(data[i], data[i + 1], data[i + 2], satMin)) mask[p] = 1;
+        if (isTarget(data[i], data[i + 1], data[i + 2], satMin)) mask[p] = 1;
       }
     }
 
