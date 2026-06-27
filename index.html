@@ -47,7 +47,8 @@
     background: #000;
     display: block;
   }
-  canvas { touch-action: manipulation; }
+  /* カスタムのピンチ/パン処理をするため、ブラウザ既定のジェスチャは無効化 */
+  canvas { touch-action: none; }
 
   .controls {
     width: 100%;
@@ -69,6 +70,7 @@
   }
   button:active { opacity: .75; }
   button.secondary { background: #3a3a3c; }
+  button.active { background: #30d158; color: #000; }
   button.shutter {
     background: #fff; color: #000; font-size: 17px;
   }
@@ -118,10 +120,14 @@
       <p class="hint">赤を取りこぼす→左へ / 余計な所まで隠れる→右へ</p>
     </div>
     <div class="row">
+      <button id="selectBtn" class="secondary">範囲を選択</button>
+      <button id="clearRoiBtn" class="secondary">範囲をクリア</button>
+    </div>
+    <div class="row">
       <button id="resetBtn" class="secondary">全部隠す</button>
       <button id="retakeBtn" class="secondary">撮り直し</button>
     </div>
-    <p class="hint">隠れた四角をタップ → その部分だけ表示（もう一度タップで隠す）</p>
+    <p class="hint" id="resultHint">タップ→開閉 ／ 2本指でズーム ／ ダブルタップで等倍</p>
   </div>
 </main>
 
@@ -131,31 +137,45 @@
 
   const video   = document.getElementById("video");
   const canvas  = document.getElementById("canvas");
-  const ctx     = canvas.getContext("2d", { willReadFrequently: true });
+  const ctx     = canvas.getContext("2d");
   const msg     = document.getElementById("msg");
 
   const cameraControls = document.getElementById("cameraControls");
   const resultControls = document.getElementById("resultControls");
-  const startBtn   = document.getElementById("startBtn");
-  const shutterBtn = document.getElementById("shutterBtn");
-  const resetBtn   = document.getElementById("resetBtn");
-  const retakeBtn  = document.getElementById("retakeBtn");
-  const sensitivity= document.getElementById("sensitivity");
-  const sensVal    = document.getElementById("sensVal");
+  const startBtn    = document.getElementById("startBtn");
+  const shutterBtn  = document.getElementById("shutterBtn");
+  const resetBtn    = document.getElementById("resetBtn");
+  const retakeBtn   = document.getElementById("retakeBtn");
+  const selectBtn   = document.getElementById("selectBtn");
+  const clearRoiBtn = document.getElementById("clearRoiBtn");
+  const sensitivity = document.getElementById("sensitivity");
+  const sensVal     = document.getElementById("sensVal");
+  const resultHint  = document.getElementById("resultHint");
 
   let stream = null;
-  let baseImageData = null;   // 撮影した元画像（処理解像度）の ImageData
-  let boxes = [];             // 検出したかたまりの外接矩形 [{x,y,w,h,revealed}]
-  const MAX_DIM = 1100;       // 処理する最大解像度（性能のため縮小）
-  const MIN_PIXELS = 12;      // ノイズ除去：これ未満の小さなかたまりは無視
+  let baseCanvas = null;      // 撮影画像を保持するオフスクリーンキャンバス
+  let baseImageData = null;   // 検出用の画素データ
+  let boxes = [];             // 検出したブロック [{x,y,w,h,revealed}]
+  let roi = null;             // 検出範囲 {x,y,w,h}（null なら画像全体）
+  let mode = "view";          // "view"（閲覧・ズーム） | "select"（範囲選択）
+  let dragRect = null;        // 範囲選択中のプレビュー矩形
+  const view = { scale: 1, tx: 0, ty: 0 };  // 画像座標→キャンバス座標の変換
+  const MAX_DIM = 1100;       // 処理する最大解像度
+  const MIN_PIXELS = 12;      // ノイズ除去
+  const MAX_ZOOM = 6;
 
-  function showMsg(text) { msg.textContent = text; msg.classList.remove("hidden"); }
-  function hideMsg() { msg.classList.add("hidden"); }
+  // ポインタ操作（タップ/パン/ピンチ/範囲選択）の状態
+  const pointers = new Map();
+  let panLast = null, pinchStartDist = 0, pinchStartScale = 1, pinchAnchor = null;
+  let moved = false, selectStart = null, lastTap = 0;
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  function showMsg(text){ msg.textContent = text; msg.classList.remove("hidden"); }
+  function hideMsg(){ msg.classList.add("hidden"); }
 
   // ---- カメラ起動 ----
   async function startCamera() {
     hideMsg();
-    // このブラウザがカメラ機能を持っているか（アプリ内ブラウザ等では無いことがある）
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       showMsg("このブラウザではカメラを使えません。\nLINE・Instagram・X などアプリ内のブラウザで開いている場合は、メニューから「Safari / Chrome で開く」を選んで開き直してください。");
       startBtn.classList.remove("hidden");
@@ -186,19 +206,24 @@
     }
   }
 
-  // ---- 撮影：映像を1枚キャンバスに取り込む ----
+  // ---- 撮影：映像を1枚オフスクリーンに取り込む ----
   function capture() {
     const vw = video.videoWidth, vh = video.videoHeight;
     if (!vw || !vh) { showMsg("まだ映像が準備できていません。少し待ってからもう一度。"); return; }
 
-    // 性能のため長辺を MAX_DIM に縮小
-    const scale = Math.min(1, MAX_DIM / Math.max(vw, vh));
-    const w = Math.round(vw * scale), h = Math.round(vh * scale);
-    canvas.width = w; canvas.height = h;
-    ctx.drawImage(video, 0, 0, w, h);
-    baseImageData = ctx.getImageData(0, 0, w, h);
+    const s = Math.min(1, MAX_DIM / Math.max(vw, vh));
+    const w = Math.round(vw * s), h = Math.round(vh * s);
 
-    // カメラを停止して結果表示へ
+    baseCanvas = document.createElement("canvas");
+    baseCanvas.width = w; baseCanvas.height = h;
+    const bctx = baseCanvas.getContext("2d", { willReadFrequently: true });
+    bctx.drawImage(video, 0, 0, w, h);
+    baseImageData = bctx.getImageData(0, 0, w, h);
+
+    canvas.width = w; canvas.height = h;
+    view.scale = 1; view.tx = 0; view.ty = 0;
+    roi = null; dragRect = null; setMode("view");
+
     stopCamera();
     video.classList.add("hidden");
     canvas.classList.remove("hidden");
@@ -213,39 +238,30 @@
   }
 
   // ---- 赤〜オレンジ画素の判定（HSV方式）----
-  // 色相(hue)が赤〜オレンジの範囲 かつ 彩度(sat)が十分高い 画素だけを拾う。
-  // これで「ベージュの紙・黒文字のフチ・暗い影」（=彩度が低い/明度が低い）を除外できる。
-  // satMin はスライダーで調整（0〜1）。小さいほど淡い赤も拾う＝感度が高い。
   function isWarm(r, g, b, satMin) {
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    const v = max / 255;                          // 明度 0..1
+    const v = max / 255;
     if (v < 0.18) return false;                   // 暗すぎ（黒・濃い影）は除外
     const delta = max - min;
-    if (delta === 0) return false;                // 無彩色（白・灰・黒）は除外
-    const sat = delta / max;                      // 彩度 0..1
-    if (sat < satMin) return false;               // 鮮やかさが足りない（紙の色など）は除外
-
-    // 色相を計算（0..360度）。赤=0付近、オレンジ=30付近。
+    if (delta === 0) return false;                // 無彩色は除外
+    const sat = delta / max;
+    if (sat < satMin) return false;               // 鮮やかさ不足（紙の色など）は除外
     let h;
     if (max === r)      h = 60 * (((g - b) / delta) % 6);
     else if (max === g) h = 60 * ((b - r) / delta + 2);
     else                h = 60 * ((r - g) / delta + 4);
     if (h < 0) h += 360;
-
-    // 赤〜オレンジの色相帯だけ（0〜45度 と 335〜360度）
-    return h <= 45 || h >= 335;
+    return h <= 45 || h >= 335;                   // 赤〜オレンジの色相帯
   }
 
   // ---- 近い矩形をグループ化（Union-Find）----
-  // 横はゆるめ（同じ単語の隣り合う文字をつなぐ）、縦は狭め（別の行は分ける）に束ねる。
   function groupRects(rects, w, h) {
     const n = rects.length;
     if (n === 0) return [];
-    // 文字サイズの目安として高さの中央値を使う
     const hs = rects.map(r => r.h).sort((a, b) => a - b);
     const medH = hs[Math.floor(n / 2)] || 8;
-    const mx = medH * 0.9;                          // 横方向の許容ギャップ（単語内の文字間）
-    const my = medH * 0.45;                         // 縦方向の許容ギャップ（行はまたがない程度）
+    const mx = medH * 0.9;                          // 横は単語内の文字間をつなぐ
+    const my = medH * 0.45;                         // 縦は別の行をまたがない程度
 
     const parent = new Int32Array(n);
     for (let i = 0; i < n; i++) parent[i] = i;
@@ -257,7 +273,6 @@
       const ax1 = a.x - mx, ay1 = a.y - my, ax2 = a.x + a.w + mx, ay2 = a.y + a.h + my;
       for (let j = i + 1; j < n; j++) {
         const b = rects[j];
-        // a を広げた矩形が b と重なれば同じグループ
         if (ax1 < b.x + b.w && ax2 > b.x && ay1 < b.y + b.h && ay2 > b.y) union(i, j);
       }
     }
@@ -284,23 +299,33 @@
     }));
   }
 
-  // ---- 検出（連結成分ラベリング）→ 矩形抽出 → 描画 ----
+  // ---- 検出 → 矩形抽出 → 描画 ----
   function detectAndRender() {
     if (!baseImageData) return;
     const t = Number(sensitivity.value);
     sensVal.textContent = t;
-    const satMin = t / 100;                        // スライダー値(8〜55)→彩度しきい値(0.08〜0.55)
+    const satMin = t / 100;
 
     const { width: w, height: h, data } = baseImageData;
     const mask = new Uint8Array(w * h);
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      if (isWarm(data[i], data[i + 1], data[i + 2], satMin)) mask[p] = 1;
+
+    // 検出範囲（roi があればその中だけ走査）
+    let x0 = 0, y0 = 0, x1 = w, y1 = h;
+    if (roi) {
+      x0 = clamp(Math.floor(roi.x), 0, w); y0 = clamp(Math.floor(roi.y), 0, h);
+      x1 = clamp(Math.ceil(roi.x + roi.w), 0, w); y1 = clamp(Math.ceil(roi.y + roi.h), 0, h);
+    }
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const p = y * w + x, i = p * 4;
+        if (isWarm(data[i], data[i + 1], data[i + 2], satMin)) mask[p] = 1;
+      }
     }
 
-    // 連結成分ラベリング（4近傍・スタックでBFS）→ 生の矩形を集める
+    // 連結成分ラベリング → 生の矩形
     const visited = new Uint8Array(w * h);
     const stack = new Int32Array(w * h);
-    const maxArea = w * h * 0.03;                  // 画像の3%を超えるかたまりは背景(机など)として除外
+    const maxArea = w * h * 0.03;
     const rects = [];
     for (let p = 0; p < mask.length; p++) {
       if (!mask[p] || visited[p]) continue;
@@ -312,55 +337,172 @@
         if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
         if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
         count++;
-        // 4近傍
         if (cx > 0     && mask[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; stack[sp++] = cur - 1; }
         if (cx < w - 1 && mask[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; stack[sp++] = cur + 1; }
         if (cy > 0     && mask[cur - w] && !visited[cur - w]) { visited[cur - w] = 1; stack[sp++] = cur - w; }
         if (cy < h - 1 && mask[cur + w] && !visited[cur + w]) { visited[cur + w] = 1; stack[sp++] = cur + w; }
       }
-      if (count < MIN_PIXELS) continue;            // ノイズ除去（小さすぎ）
+      if (count < MIN_PIXELS) continue;
       const bw = maxX - minX + 1, bh = maxY - minY + 1;
-      if (bw * bh > maxArea) continue;             // 背景の巨大ブロック（机など）を除外
+      if (bw * bh > maxArea) continue;
       rects.push({ x: minX, y: minY, w: bw, h: bh });
     }
 
-    // 近いかたまり同士をグループ化（つながった黒ブロックを1単位として一括開閉できるように）
     boxes = groupRects(rects, w, h).map(r => ({ ...r, revealed: false }));
     render();
   }
 
-  // ---- 再描画：元画像 + 隠れている矩形を塗る ----
+  // ---- 描画（ズーム/パンを反映）----
   function render() {
-    ctx.putImageData(baseImageData, 0, 0);
+    if (!baseCanvas) return;
+    const w = canvas.width, h = canvas.height;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+    ctx.drawImage(baseCanvas, 0, 0);
+
     ctx.fillStyle = "#2b2b2e";
-    for (const b of boxes) {
-      if (!b.revealed) ctx.fillRect(b.x, b.y, b.w, b.h);
+    for (const b of boxes) { if (!b.revealed) ctx.fillRect(b.x, b.y, b.w, b.h); }
+
+    const lw = 2 / view.scale, dash = [8 / view.scale, 6 / view.scale];
+    if (roi) {
+      ctx.strokeStyle = "#0a84ff"; ctx.lineWidth = lw;
+      ctx.setLineDash(dash); ctx.strokeRect(roi.x, roi.y, roi.w, roi.h); ctx.setLineDash([]);
+    }
+    if (dragRect) {
+      ctx.fillStyle = "rgba(48,209,88,0.15)";
+      ctx.fillRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h);
+      ctx.strokeStyle = "#30d158"; ctx.lineWidth = lw;
+      ctx.setLineDash(dash); ctx.strokeRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h); ctx.setLineDash([]);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  // ---- 座標変換ヘルパー ----
+  function clientToCanvas(cx, cy) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (cx - r.left) * (canvas.width / r.width), y: (cy - r.top) * (canvas.height / r.height) };
+  }
+  function toImg(cx, cy) {
+    const c = clientToCanvas(cx, cy);
+    return { x: (c.x - view.tx) / view.scale, y: (c.y - view.ty) / view.scale };
+  }
+  function normRect(a, b) {
+    return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
+  }
+  function clampPan() {
+    const w = canvas.width, h = canvas.height;
+    view.tx = clamp(view.tx, w - w * view.scale, 0);
+    view.ty = clamp(view.ty, h - h * view.scale, 0);
+  }
+  function resetZoom() { view.scale = 1; view.tx = 0; view.ty = 0; render(); }
+
+  function setMode(m) {
+    mode = m;
+    if (m === "select") {
+      selectBtn.textContent = "範囲選択中…";
+      selectBtn.classList.add("active");
+      resultHint.textContent = "指でドラッグして、隠したい範囲を囲んでください";
+    } else {
+      selectBtn.textContent = "範囲を選択";
+      selectBtn.classList.remove("active");
+      resultHint.textContent = "タップ→開閉 ／ 2本指でズーム ／ ダブルタップで等倍";
     }
   }
 
-  // ---- タップ：一番近い矩形を開閉（指の誤差を許容し、小さなブロックも押しやすく）----
-  function onTap(clientX, clientY) {
-    const rect = canvas.getBoundingClientRect();
-    const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
-    const x = (clientX - rect.left) * sx, y = (clientY - rect.top) * sy;
-    // タップの許容範囲（画面上で約20px分を画像座標に換算）
-    const tol = 20 * sx;
+  // ---- ポインタ操作 ----
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    moved = false;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinchStartDist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      pinchStartScale = view.scale;
+      pinchAnchor = toImg((a.x + b.x) / 2, (a.y + b.y) / 2);
+      dragRect = null;
+    } else if (pointers.size === 1) {
+      panLast = { x: e.clientX, y: e.clientY };
+      if (mode === "select") { selectStart = toImg(e.clientX, e.clientY); dragRect = null; }
+    }
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointers.size >= 2) {
+      // ピンチでズーム（2本指の中点を固定して拡大縮小）
+      const [a, b] = [...pointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      view.scale = clamp(pinchStartScale * d / pinchStartDist, 1, MAX_ZOOM);
+      const cc = clientToCanvas((a.x + b.x) / 2, (a.y + b.y) / 2);
+      view.tx = cc.x - pinchAnchor.x * view.scale;
+      view.ty = cc.y - pinchAnchor.y * view.scale;
+      clampPan(); moved = true; render();
+    } else if (pointers.size === 1) {
+      if (mode === "select") {
+        dragRect = normRect(selectStart, toImg(e.clientX, e.clientY));
+        moved = true; render();
+      } else {
+        const dx = e.clientX - panLast.x, dy = e.clientY - panLast.y;
+        if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+        const k = canvas.width / canvas.getBoundingClientRect().width;
+        view.tx += dx * k; view.ty += dy * k;
+        panLast = { x: e.clientX, y: e.clientY };
+        clampPan(); render();
+      }
+    }
+  });
+
+  function endPointer(e) {
+    if (!pointers.has(e.pointerId)) return;
+    const sizeBefore = pointers.size;
+    const p = pointers.get(e.pointerId);
+    pointers.delete(e.pointerId);
+
+    // ピンチ後に1本残ったら、その指をパンの基準にする（タップ誤発火も防ぐ）
+    if (pointers.size === 1) {
+      const r = [...pointers.values()][0];
+      panLast = { x: r.x, y: r.y }; moved = true;
+      return;
+    }
+    if (mode === "select" && sizeBefore === 1) {
+      if (dragRect && dragRect.w > 6 && dragRect.h > 6) {
+        roi = { ...dragRect }; dragRect = null; setMode("view"); detectAndRender();
+      } else {
+        dragRect = null; setMode("view"); render();
+      }
+      return;
+    }
+    if (sizeBefore === 1 && !moved) handleTap(p.x, p.y);
+  }
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+
+  // ---- タップ：ダブルタップで等倍 / 単タップで一番近いブロックを開閉 ----
+  function handleTap(cx, cy) {
+    const now = Date.now();
+    if (now - lastTap < 300) { lastTap = 0; resetZoom(); return; }
+    lastTap = now;
+
+    const pt = toImg(cx, cy);
+    const r = canvas.getBoundingClientRect();
+    const tol = 20 * (canvas.width / r.width) / view.scale;  // 画面上で約20px
     let hit = -1, best = Infinity;
     for (let i = 0; i < boxes.length; i++) {
       const b = boxes[i];
-      // 点から矩形までの距離（矩形の内側なら0）
-      const dx = Math.max(b.x - x, 0, x - (b.x + b.w));
-      const dy = Math.max(b.y - y, 0, y - (b.y + b.h));
+      const dx = Math.max(b.x - pt.x, 0, pt.x - (b.x + b.w));
+      const dy = Math.max(b.y - pt.y, 0, pt.y - (b.y + b.h));
       const d = Math.hypot(dx, dy);
       if (d < best) { best = d; hit = i; }
     }
-    if (hit >= 0 && best <= tol) {
-      boxes[hit].revealed = !boxes[hit].revealed;
-      render();
-    }
+    if (hit >= 0 && best <= tol) { boxes[hit].revealed = !boxes[hit].revealed; render(); }
   }
 
-  // ---- イベント ----
+  // ---- ボタン ----
   startBtn.addEventListener("click", startCamera);
   shutterBtn.addEventListener("click", capture);
   resetBtn.addEventListener("click", () => { boxes.forEach(b => b.revealed = false); render(); });
@@ -369,10 +511,12 @@
     video.classList.remove("hidden");
     resultControls.classList.add("hidden");
     cameraControls.classList.remove("hidden");
+    roi = null; dragRect = null; setMode("view");
     startCamera();
   });
+  selectBtn.addEventListener("click", () => { setMode(mode === "select" ? "view" : "select"); render(); });
+  clearRoiBtn.addEventListener("click", () => { roi = null; detectAndRender(); });
   sensitivity.addEventListener("input", detectAndRender);
-  canvas.addEventListener("click", (e) => onTap(e.clientX, e.clientY));
 
   sensVal.textContent = sensitivity.value;
 })();
