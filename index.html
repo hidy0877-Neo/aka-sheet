@@ -168,7 +168,6 @@
   let colorMode = "both";      // "both" | "red" | "blue"
   const view = { scale: 1, tx: 0, ty: 0 };
   const MAX_DIM = 1100;
-  const DILATE_R = 2;          // マスクの膨張量
   const TAP_SEARCH = 16;       // タップ位置の近くでマーカーを探す半径(px)
   const MAX_ZOOM = 6;
 
@@ -328,12 +327,14 @@
     const t = Number(sensitivity.value);
     sensVal.textContent = t;
     const satMin = t / 100;
+    // 膨張量もスライダーに連動：右(厳しめ)ほど小さく＝タップ範囲が締まる
+    const r = t <= 18 ? 3 : t <= 35 ? 2 : 1;
     const { width: w, height: h, data } = baseImageData;
     let m = new Uint8Array(w * h);
     for (let i = 0, p = 0; i < data.length; i += 4, p++) {
       if (isTarget(data[i], data[i + 1], data[i + 2], satMin)) m[p] = 1;
     }
-    markerMask = dilate(m, w, h, DILATE_R);
+    markerMask = dilate(m, w, h, r);
     mw = w; mh = h;
     render();
   }
