@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>赤シート暗記アプリ</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+    background: #1c1c1e;
+    color: #fff;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+  header {
+    padding: 12px 16px;
+    text-align: center;
+    font-size: 16px;
+    font-weight: 600;
+    background: #2c2c2e;
+    border-bottom: 1px solid #3a3a3c;
+  }
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    gap: 12px;
+  }
+  /* カメラ映像・結果キャンバスの共通枠 */
+  #stage {
+    position: relative;
+    width: 100%;
+    max-width: 600px;
+    display: flex;
+    justify-content: center;
+  }
+  video, canvas {
+    width: 100%;
+    max-width: 600px;
+    border-radius: 12px;
+    background: #000;
+    display: block;
+  }
+  canvas { touch-action: manipulation; }
+
+  .controls {
+    width: 100%;
+    max-width: 600px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .row { display: flex; gap: 10px; }
+  button {
+    flex: 1;
+    padding: 14px;
+    font-size: 16px;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    background: #0a84ff;
+    color: #fff;
+  }
+  button:active { opacity: .75; }
+  button.secondary { background: #3a3a3c; }
+  button.shutter {
+    background: #fff; color: #000; font-size: 17px;
+  }
+
+  .slider-box {
+    background: #2c2c2e;
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .slider-box label {
+    display: flex; justify-content: space-between;
+    font-size: 13px; color: #aeaeb2; margin-bottom: 8px;
+  }
+  input[type=range] { width: 100%; }
+
+  .hidden { display: none !important; }
+  #msg {
+    font-size: 13px; color: #aeaeb2; text-align: center;
+    padding: 0 16px; line-height: 1.6;
+  }
+  .hint { font-size: 12px; color: #8e8e93; text-align: center; }
+</style>
+</head>
+<body>
+<header>赤シート暗記アプリ</header>
+
+<main>
+  <div id="stage">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas" class="hidden"></canvas>
+  </div>
+
+  <div id="msg" class="hidden"></div>
+
+  <!-- 撮影前のコントロール -->
+  <div class="controls" id="cameraControls">
+    <button id="startBtn">カメラを起動</button>
+    <button id="shutterBtn" class="shutter hidden">● 撮影</button>
+    <p class="hint">背面カメラで、オレンジ/赤のペンで書いた答えを撮ってください</p>
+  </div>
+
+  <!-- 撮影後のコントロール -->
+  <div class="controls hidden" id="resultControls">
+    <div class="slider-box">
+      <label><span>検出する赤の感度</span><span id="sensVal"></span></label>
+      <input type="range" id="sensitivity" min="8" max="55" value="22">
+      <p class="hint">赤を取りこぼす→左へ / 余計な所まで隠れる→右へ</p>
+    </div>
+    <div class="row">
+      <button id="resetBtn" class="secondary">全部隠す</button>
+      <button id="retakeBtn" class="secondary">撮り直し</button>
+    </div>
+    <p class="hint">隠れた四角をタップ → その部分だけ表示（もう一度タップで隠す）</p>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const video   = document.getElementById("video");
+  const canvas  = document.getElementById("canvas");
+  const ctx     = canvas.getContext("2d", { willReadFrequently: true });
+  const msg     = document.getElementById("msg");
+
+  const cameraControls = document.getElementById("cameraControls");
+  const resultControls = document.getElementById("resultControls");
+  const startBtn   = document.getElementById("startBtn");
+  const shutterBtn = document.getElementById("shutterBtn");
+  const resetBtn   = document.getElementById("resetBtn");
+  const retakeBtn  = document.getElementById("retakeBtn");
+  const sensitivity= document.getElementById("sensitivity");
+  const sensVal    = document.getElementById("sensVal");
+
+  let stream = null;
+  let baseImageData = null;   // 撮影した元画像（処理解像度）の ImageData
+  let boxes = [];             // 検出したかたまりの外接矩形 [{x,y,w,h,revealed}]
+  const MAX_DIM = 1100;       // 処理する最大解像度（性能のため縮小）
+  const MIN_PIXELS = 12;      // ノイズ除去：これ未満の小さなかたまりは無視
+
+  function showMsg(text) { msg.textContent = text; msg.classList.remove("hidden"); }
+  function hideMsg() { msg.classList.add("hidden"); }
+
+  // ---- カメラ起動 ----
+  async function startCamera() {
+    hideMsg();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+      startBtn.classList.add("hidden");
+      shutterBtn.classList.remove("hidden");
+    } catch (e) {
+      showMsg("カメラを起動できませんでした。\nHTTPSのURLで開いているか、カメラの許可を確認してください。\n（" + e.name + "）");
+    }
+  }
+
+  // ---- 撮影：映像を1枚キャンバスに取り込む ----
+  function capture() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) { showMsg("まだ映像が準備できていません。少し待ってからもう一度。"); return; }
+
+    // 性能のため長辺を MAX_DIM に縮小
+    const scale = Math.min(1, MAX_DIM / Math.max(vw, vh));
+    const w = Math.round(vw * scale), h = Math.round(vh * scale);
+    canvas.width = w; canvas.height = h;
+    ctx.drawImage(video, 0, 0, w, h);
+    baseImageData = ctx.getImageData(0, 0, w, h);
+
+    // カメラを停止して結果表示へ
+    stopCamera();
+    video.classList.add("hidden");
+    canvas.classList.remove("hidden");
+    cameraControls.classList.add("hidden");
+    resultControls.classList.remove("hidden");
+
+    detectAndRender();
+  }
+
+  function stopCamera() {
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  }
+
+  // ---- 赤〜オレンジ画素の判定（HSV方式）----
+  // 色相(hue)が赤〜オレンジの範囲 かつ 彩度(sat)が十分高い 画素だけを拾う。
+  // これで「ベージュの紙・黒文字のフチ・暗い影」（=彩度が低い/明度が低い）を除外できる。
+  // satMin はスライダーで調整（0〜1）。小さいほど淡い赤も拾う＝感度が高い。
+  function isWarm(r, g, b, satMin) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const v = max / 255;                          // 明度 0..1
+    if (v < 0.18) return false;                   // 暗すぎ（黒・濃い影）は除外
+    const delta = max - min;
+    if (delta === 0) return false;                // 無彩色（白・灰・黒）は除外
+    const sat = delta / max;                      // 彩度 0..1
+    if (sat < satMin) return false;               // 鮮やかさが足りない（紙の色など）は除外
+
+    // 色相を計算（0..360度）。赤=0付近、オレンジ=30付近。
+    let h;
+    if (max === r)      h = 60 * (((g - b) / delta) % 6);
+    else if (max === g) h = 60 * ((b - r) / delta + 2);
+    else                h = 60 * ((r - g) / delta + 4);
+    if (h < 0) h += 360;
+
+    // 赤〜オレンジの色相帯だけ（0〜45度 と 335〜360度）
+    return h <= 45 || h >= 335;
+  }
+
+  // ---- 近い矩形をグループ化（Union-Find）----
+  // 横はゆるめ（同じ単語の隣り合う文字をつなぐ）、縦は狭め（別の行は分ける）に束ねる。
+  function groupRects(rects, w, h) {
+    const n = rects.length;
+    if (n === 0) return [];
+    // 文字サイズの目安として高さの中央値を使う
+    const hs = rects.map(r => r.h).sort((a, b) => a - b);
+    const medH = hs[Math.floor(n / 2)] || 8;
+    const mx = medH * 0.9;                          // 横方向の許容ギャップ（単語内の文字間）
+    const my = medH * 0.45;                         // 縦方向の許容ギャップ（行はまたがない程度）
+
+    const parent = new Int32Array(n);
+    for (let i = 0; i < n; i++) parent[i] = i;
+    const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+    const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[a] = b; };
+
+    for (let i = 0; i < n; i++) {
+      const a = rects[i];
+      const ax1 = a.x - mx, ay1 = a.y - my, ax2 = a.x + a.w + mx, ay2 = a.y + a.h + my;
+      for (let j = i + 1; j < n; j++) {
+        const b = rects[j];
+        // a を広げた矩形が b と重なれば同じグループ
+        if (ax1 < b.x + b.w && ax2 > b.x && ay1 < b.y + b.h && ay2 > b.y) union(i, j);
+      }
+    }
+
+    const groups = new Map();
+    for (let i = 0; i < n; i++) {
+      const root = find(i), r = rects[i];
+      const g = groups.get(root);
+      if (!g) groups.set(root, { x: r.x, y: r.y, x2: r.x + r.w, y2: r.y + r.h });
+      else {
+        if (r.x < g.x) g.x = r.x;
+        if (r.y < g.y) g.y = r.y;
+        if (r.x + r.w > g.x2) g.x2 = r.x + r.w;
+        if (r.y + r.h > g.y2) g.y2 = r.y + r.h;
+      }
+    }
+
+    const pad = 3;
+    return [...groups.values()].map(g => ({
+      x: Math.max(0, g.x - pad),
+      y: Math.max(0, g.y - pad),
+      w: Math.min(w, g.x2 + pad) - Math.max(0, g.x - pad),
+      h: Math.min(h, g.y2 + pad) - Math.max(0, g.y - pad)
+    }));
+  }
+
+  // ---- 検出（連結成分ラベリング）→ 矩形抽出 → 描画 ----
+  function detectAndRender() {
+    if (!baseImageData) return;
+    const t = Number(sensitivity.value);
+    sensVal.textContent = t;
+    const satMin = t / 100;                        // スライダー値(8〜55)→彩度しきい値(0.08〜0.55)
+
+    const { width: w, height: h, data } = baseImageData;
+    const mask = new Uint8Array(w * h);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      if (isWarm(data[i], data[i + 1], data[i + 2], satMin)) mask[p] = 1;
+    }
+
+    // 連結成分ラベリング（4近傍・スタックでBFS）→ 生の矩形を集める
+    const visited = new Uint8Array(w * h);
+    const stack = new Int32Array(w * h);
+    const maxArea = w * h * 0.03;                  // 画像の3%を超えるかたまりは背景(机など)として除外
+    const rects = [];
+    for (let p = 0; p < mask.length; p++) {
+      if (!mask[p] || visited[p]) continue;
+      let sp = 0; stack[sp++] = p; visited[p] = 1;
+      let minX = w, minY = h, maxX = 0, maxY = 0, count = 0;
+      while (sp > 0) {
+        const cur = stack[--sp];
+        const cx = cur % w, cy = (cur - cx) / w;
+        if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+        count++;
+        // 4近傍
+        if (cx > 0     && mask[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; stack[sp++] = cur - 1; }
+        if (cx < w - 1 && mask[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; stack[sp++] = cur + 1; }
+        if (cy > 0     && mask[cur - w] && !visited[cur - w]) { visited[cur - w] = 1; stack[sp++] = cur - w; }
+        if (cy < h - 1 && mask[cur + w] && !visited[cur + w]) { visited[cur + w] = 1; stack[sp++] = cur + w; }
+      }
+      if (count < MIN_PIXELS) continue;            // ノイズ除去（小さすぎ）
+      const bw = maxX - minX + 1, bh = maxY - minY + 1;
+      if (bw * bh > maxArea) continue;             // 背景の巨大ブロック（机など）を除外
+      rects.push({ x: minX, y: minY, w: bw, h: bh });
+    }
+
+    // 近いかたまり同士をグループ化（つながった黒ブロックを1単位として一括開閉できるように）
+    boxes = groupRects(rects, w, h).map(r => ({ ...r, revealed: false }));
+    render();
+  }
+
+  // ---- 再描画：元画像 + 隠れている矩形を塗る ----
+  function render() {
+    ctx.putImageData(baseImageData, 0, 0);
+    ctx.fillStyle = "#2b2b2e";
+    for (const b of boxes) {
+      if (!b.revealed) ctx.fillRect(b.x, b.y, b.w, b.h);
+    }
+  }
+
+  // ---- タップ：その矩形だけ開閉 ----
+  function onTap(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+    const x = (clientX - rect.left) * sx, y = (clientY - rect.top) * sy;
+    // 上に重なった矩形を優先（後ろから探索）
+    for (let i = boxes.length - 1; i >= 0; i--) {
+      const b = boxes[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        b.revealed = !b.revealed;
+        render();
+        return;
+      }
+    }
+  }
+
+  // ---- イベント ----
+  startBtn.addEventListener("click", startCamera);
+  shutterBtn.addEventListener("click", capture);
+  resetBtn.addEventListener("click", () => { boxes.forEach(b => b.revealed = false); render(); });
+  retakeBtn.addEventListener("click", () => {
+    canvas.classList.add("hidden");
+    video.classList.remove("hidden");
+    resultControls.classList.add("hidden");
+    cameraControls.classList.remove("hidden");
+    startCamera();
+  });
+  sensitivity.addEventListener("input", detectAndRender);
+  canvas.addEventListener("click", (e) => onTap(e.clientX, e.clientY));
+
+  sensVal.textContent = sensitivity.value;
+})();
+</script>
+</body>
+</html>
