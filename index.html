@@ -321,19 +321,25 @@
     }
   }
 
-  // ---- タップ：その矩形だけ開閉 ----
+  // ---- タップ：一番近い矩形を開閉（指の誤差を許容し、小さなブロックも押しやすく）----
   function onTap(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
     const sx = canvas.width / rect.width, sy = canvas.height / rect.height;
     const x = (clientX - rect.left) * sx, y = (clientY - rect.top) * sy;
-    // 上に重なった矩形を優先（後ろから探索）
-    for (let i = boxes.length - 1; i >= 0; i--) {
+    // タップの許容範囲（画面上で約20px分を画像座標に換算）
+    const tol = 20 * sx;
+    let hit = -1, best = Infinity;
+    for (let i = 0; i < boxes.length; i++) {
       const b = boxes[i];
-      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
-        b.revealed = !b.revealed;
-        render();
-        return;
-      }
+      // 点から矩形までの距離（矩形の内側なら0）
+      const dx = Math.max(b.x - x, 0, x - (b.x + b.w));
+      const dy = Math.max(b.y - y, 0, y - (b.y + b.h));
+      const d = Math.hypot(dx, dy);
+      if (d < best) { best = d; hit = i; }
+    }
+    if (hit >= 0 && best <= tol) {
+      boxes[hit].revealed = !boxes[hit].revealed;
+      render();
     }
   }
 
