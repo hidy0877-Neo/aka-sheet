@@ -117,9 +117,14 @@
   <!-- 撮影後のコントロール -->
   <div class="controls hidden" id="resultControls">
     <div class="slider-box">
-      <label><span>検出する色の感度（赤・青マーカー）</span><span id="sensVal"></span></label>
+      <label><span>検出する色の感度</span><span id="sensVal"></span></label>
       <input type="range" id="sensitivity" min="8" max="55" value="22">
       <p class="hint">取りこぼす→左へ / 余計な所まで隠れる→右へ</p>
+    </div>
+    <div class="row">
+      <button id="colRed" class="secondary">赤だけ</button>
+      <button id="colBlue" class="secondary">青だけ</button>
+      <button id="colBoth" class="secondary active">両方</button>
     </div>
     <div class="row">
       <button id="selectBtn" class="secondary">範囲を選択</button>
@@ -152,6 +157,9 @@
   const retakeBtn   = document.getElementById("retakeBtn");
   const selectBtn   = document.getElementById("selectBtn");
   const clearRoiBtn = document.getElementById("clearRoiBtn");
+  const colRed      = document.getElementById("colRed");
+  const colBlue     = document.getElementById("colBlue");
+  const colBoth     = document.getElementById("colBoth");
   const sensitivity = document.getElementById("sensitivity");
   const sensVal     = document.getElementById("sensVal");
   const resultHint  = document.getElementById("resultHint");
@@ -161,6 +169,7 @@
   let baseImageData = null;   // 検出用の画素データ
   let boxes = [];             // 検出したブロック [{x,y,w,h,revealed}]
   let roi = null;             // 検出範囲 {x,y,w,h}（null なら画像全体）
+  let colorMode = "both";     // 検出する色 "both" | "red" | "blue"
   let mode = "view";          // "view"（閲覧・ズーム） | "select"（範囲選択）
   let dragRect = null;        // 範囲選択中のプレビュー矩形
   const view = { scale: 1, tx: 0, ty: 0 };  // 画像座標→キャンバス座標の変換
@@ -290,9 +299,11 @@
     else if (max === g) h = 60 * ((b - r) / delta + 2);
     else                h = 60 * ((r - g) / delta + 4);
     if (h < 0) h += 360;
-    if (h <= 45 || h >= 335) return true;         // 赤〜オレンジ
-    if (h >= 200 && h <= 250) return true;        // 青マーカー（シアン180〜200は除外）
-    return false;
+    const isRed  = (h <= 45 || h >= 335);         // 赤〜オレンジ
+    const isBlue = (h >= 200 && h <= 250);        // 青マーカー（シアン180〜200は除外）
+    if (colorMode === "red")  return isRed;
+    if (colorMode === "blue") return isBlue;
+    return isRed || isBlue;                        // both
   }
 
   // ---- 近い矩形をグループ化（Union-Find）----
@@ -563,6 +574,17 @@
   });
   selectBtn.addEventListener("click", () => { setMode(mode === "select" ? "view" : "select"); render(); });
   clearRoiBtn.addEventListener("click", () => { roi = null; detectAndRender(); });
+
+  function setColorMode(m) {
+    colorMode = m;
+    colRed.classList.toggle("active", m === "red");
+    colBlue.classList.toggle("active", m === "blue");
+    colBoth.classList.toggle("active", m === "both");
+    detectAndRender();
+  }
+  colRed.addEventListener("click", () => setColorMode("red"));
+  colBlue.addEventListener("click", () => setColorMode("blue"));
+  colBoth.addEventListener("click", () => setColorMode("both"));
   sensitivity.addEventListener("input", detectAndRender);
 
   sensVal.textContent = sensitivity.value;
