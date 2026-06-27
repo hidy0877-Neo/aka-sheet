@@ -293,17 +293,23 @@
     const delta = max - min;
     if (delta === 0) return false;                // 無彩色は除外
     const sat = delta / max;
-    if (sat < satMin) return false;               // 鮮やかさ不足（紙の色など）は除外
     let h;
     if (max === r)      h = 60 * (((g - b) / delta) % 6);
     else if (max === g) h = 60 * ((b - r) / delta + 2);
     else                h = 60 * ((r - g) / delta + 4);
     if (h < 0) h += 360;
+
     const isRed  = (h <= 45 || h >= 335);         // 赤〜オレンジ
-    const isBlue = (h >= 200 && h <= 250);        // 青マーカー（シアン180〜200は除外）
-    if (colorMode === "red")  return isRed;
-    if (colorMode === "blue") return isBlue;
-    return isRed || isBlue;                        // both
+    const isBlue = (h >= 180 && h <= 255);        // 青〜水色（シアン寄りも拾う）
+    // 水色マーカーは淡いことが多いので、青は彩度しきい値を緩める
+    const blueSat = satMin * 0.6;
+
+    if (colorMode === "red")  return isRed && sat >= satMin;
+    if (colorMode === "blue") return isBlue && sat >= blueSat;
+    // both
+    if (isRed && sat >= satMin) return true;
+    if (isBlue && sat >= blueSat) return true;
+    return false;
   }
 
   // ---- 近い矩形をグループ化（Union-Find）----
