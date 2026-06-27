@@ -174,7 +174,7 @@
   let dragRect = null;        // 範囲選択中のプレビュー矩形
   const view = { scale: 1, tx: 0, ty: 0 };  // 画像座標→キャンバス座標の変換
   const MAX_DIM = 1100;       // 処理する最大解像度
-  const MIN_PIXELS = 12;      // ノイズ除去
+  const MIN_PIXELS = 8;       // ノイズ除去
   const MAX_ZOOM = 6;
 
   // ポインタ操作（タップ/パン/ピンチ/範囲選択）の状態
@@ -300,7 +300,7 @@
     if (h < 0) h += 360;
 
     const isRed  = (h <= 45 || h >= 335);         // 赤〜オレンジ
-    const isBlue = (h >= 180 && h <= 255);        // 青〜水色（シアン寄りも拾う）
+    const isBlue = (h >= 178 && h <= 260);        // 青〜水色（シアン寄り・青紫寄りも拾う）
     // 水色マーカーは淡いことが多いので、青は彩度しきい値を緩める
     const blueSat = satMin * 0.6;
 
@@ -357,6 +357,32 @@
     }));
   }
 
+  // ---- マスクを膨張させる（分断をつなぎ、フチの取りこぼしを覆う）----
+  // 半径 r の四角形で膨張。横→縦の分離処理で高速。
+  function dilate(src, w, h, r) {
+    if (r <= 0) return src;
+    const tmp = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        let on = 0;
+        const x0 = Math.max(0, x - r), x1 = Math.min(w - 1, x + r);
+        for (let xx = x0; xx <= x1; xx++) { if (src[row + xx]) { on = 1; break; } }
+        tmp[row + x] = on;
+      }
+    }
+    const out = new Uint8Array(w * h);
+    for (let x = 0; x < w; x++) {
+      for (let y = 0; y < h; y++) {
+        let on = 0;
+        const y0 = Math.max(0, y - r), y1 = Math.min(h - 1, y + r);
+        for (let yy = y0; yy <= y1; yy++) { if (tmp[yy * w + x]) { on = 1; break; } }
+        out[y * w + x] = on;
+      }
+    }
+    return out;
+  }
+
   // ---- 検出 → 矩形抽出 → 描画 ----
   function detectAndRender() {
     if (!baseImageData) return;
@@ -365,7 +391,7 @@
     const satMin = t / 100;
 
     const { width: w, height: h, data } = baseImageData;
-    const mask = new Uint8Array(w * h);
+    let mask = new Uint8Array(w * h);
 
     // 検出範囲（roi があればその中だけ走査）
     let x0 = 0, y0 = 0, x1 = w, y1 = h;
@@ -379,6 +405,9 @@
         if (isTarget(data[i], data[i + 1], data[i + 2], satMin)) mask[p] = 1;
       }
     }
+
+    // 膨張で分断をつなぎ、マーカーのフチの取りこぼしを覆う
+    mask = dilate(mask, w, h, 2);
 
     // 連結成分ラベリング → 生の矩形
     const visited = new Uint8Array(w * h);
