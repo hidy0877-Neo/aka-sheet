@@ -155,6 +155,12 @@
   // ---- カメラ起動 ----
   async function startCamera() {
     hideMsg();
+    // このブラウザがカメラ機能を持っているか（アプリ内ブラウザ等では無いことがある）
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showMsg("このブラウザではカメラを使えません。\nLINE・Instagram・X などアプリ内のブラウザで開いている場合は、メニューから「Safari / Chrome で開く」を選んで開き直してください。");
+      startBtn.classList.remove("hidden");
+      return;
+    }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: "environment" } },
@@ -165,7 +171,18 @@
       startBtn.classList.add("hidden");
       shutterBtn.classList.remove("hidden");
     } catch (e) {
-      showMsg("カメラを起動できませんでした。\nHTTPSのURLで開いているか、カメラの許可を確認してください。\n（" + e.name + "）");
+      let m;
+      if (e.name === "NotAllowedError" || e.name === "SecurityError") {
+        m = "カメラの使用が許可されませんでした。\nアドレスバーのカメラ／鍵アイコン、またはブラウザの設定でこのサイトのカメラを「許可」にしてから、もう一度「カメラを起動」を押してください。";
+      } else if (e.name === "NotFoundError" || e.name === "OverconstrainedError") {
+        m = "使えるカメラが見つかりませんでした。別のブラウザ（Safari / Chrome）で試してください。（" + e.name + "）";
+      } else if (e.name === "NotReadableError") {
+        m = "カメラが他のアプリで使用中の可能性があります。他のカメラアプリを閉じて、もう一度お試しください。";
+      } else {
+        m = "カメラを起動できませんでした（" + e.name + "）。\nSafari / Chrome で、URL https://hidy0877-neo.github.io/aka-sheet/ を直接開いているか確認してください。";
+      }
+      showMsg(m);
+      startBtn.classList.remove("hidden");
     }
   }
 
