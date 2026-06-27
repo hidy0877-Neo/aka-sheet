@@ -328,7 +328,7 @@
     sensVal.textContent = t;
     const satMin = t / 100;
     // 膨張量もスライダーに連動：右(厳しめ)ほど小さく＝タップ範囲が締まる
-    const r = t <= 18 ? 3 : t <= 35 ? 2 : 1;
+    const r = t <= 30 ? 2 : 1;
     const { width: w, height: h, data } = baseImageData;
     let m = new Uint8Array(w * h);
     for (let i = 0, p = 0; i < data.length; i += 4, p++) {
@@ -360,6 +360,10 @@
     }
     if (seed < 0) return null;
 
+    // タップ地点からの最大の広がり。縦は約1行ぶんに制限して複数行への暴走を防ぐ。
+    const seedX = seed % w, seedY = (seed - (seed % w)) / w;
+    const MAX_H = 260, MAX_V = 22;
+
     const visited = new Uint8Array(w * h);
     const stack = new Int32Array(w * h);
     let sp = 0; stack[sp++] = seed; visited[seed] = 1;
@@ -369,10 +373,13 @@
       const cx = cur % w, cy = (cur - cx) / w;
       if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
       if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
-      if (cx > 0     && markerMask[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; stack[sp++] = cur - 1; }
-      if (cx < w - 1 && markerMask[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; stack[sp++] = cur + 1; }
-      if (cy > 0     && markerMask[cur - w] && !visited[cur - w]) { visited[cur - w] = 1; stack[sp++] = cur - w; }
-      if (cy < h - 1 && markerMask[cur + w] && !visited[cur + w]) { visited[cur + w] = 1; stack[sp++] = cur + w; }
+      // タップ地点から離れすぎたら、それ以上は広げない
+      const canL = (cx - 1 >= seedX - MAX_H), canR = (cx + 1 <= seedX + MAX_H);
+      const canU = (cy - 1 >= seedY - MAX_V), canD = (cy + 1 <= seedY + MAX_V);
+      if (canL && cx > 0     && markerMask[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; stack[sp++] = cur - 1; }
+      if (canR && cx < w - 1 && markerMask[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; stack[sp++] = cur + 1; }
+      if (canU && cy > 0     && markerMask[cur - w] && !visited[cur - w]) { visited[cur - w] = 1; stack[sp++] = cur - w; }
+      if (canD && cy < h - 1 && markerMask[cur + w] && !visited[cur + w]) { visited[cur + w] = 1; stack[sp++] = cur + w; }
     }
     const pad = 2;
     return {
