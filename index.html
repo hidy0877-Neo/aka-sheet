@@ -109,7 +109,9 @@
   <div class="controls" id="cameraControls">
     <button id="startBtn">カメラを起動</button>
     <button id="shutterBtn" class="shutter hidden">● 撮影</button>
-    <p class="hint">背面カメラで、赤・オレンジ・青のマーカーで塗った箇所を撮ってください</p>
+    <button id="fileBtn" class="secondary">保存した写真から選ぶ</button>
+    <input id="fileInput" type="file" accept="image/*" class="hidden">
+    <p class="hint">背面カメラで撮るか、保存済みの写真を選んでください（赤・オレンジ・青のマーカー部分を隠します）</p>
   </div>
 
   <!-- 撮影後のコントロール -->
@@ -144,6 +146,8 @@
   const resultControls = document.getElementById("resultControls");
   const startBtn    = document.getElementById("startBtn");
   const shutterBtn  = document.getElementById("shutterBtn");
+  const fileBtn     = document.getElementById("fileBtn");
+  const fileInput   = document.getElementById("fileInput");
   const resetBtn    = document.getElementById("resetBtn");
   const retakeBtn   = document.getElementById("retakeBtn");
   const selectBtn   = document.getElementById("selectBtn");
@@ -206,18 +210,17 @@
     }
   }
 
-  // ---- 撮影：映像を1枚オフスクリーンに取り込む ----
-  function capture() {
-    const vw = video.videoWidth, vh = video.videoHeight;
-    if (!vw || !vh) { showMsg("まだ映像が準備できていません。少し待ってからもう一度。"); return; }
+  // ---- 画像ソース（カメラ映像 or 読み込んだ画像）を取り込んで結果画面へ ----
+  function setupFromSource(src, sw, sh) {
+    if (!sw || !sh) { showMsg("画像を読み込めませんでした。別の写真でお試しください。"); return; }
 
-    const s = Math.min(1, MAX_DIM / Math.max(vw, vh));
-    const w = Math.round(vw * s), h = Math.round(vh * s);
+    const s = Math.min(1, MAX_DIM / Math.max(sw, sh));
+    const w = Math.round(sw * s), h = Math.round(sh * s);
 
     baseCanvas = document.createElement("canvas");
     baseCanvas.width = w; baseCanvas.height = h;
     const bctx = baseCanvas.getContext("2d", { willReadFrequently: true });
-    bctx.drawImage(video, 0, 0, w, h);
+    bctx.drawImage(src, 0, 0, w, h);
     baseImageData = bctx.getImageData(0, 0, w, h);
 
     canvas.width = w; canvas.height = h;
@@ -225,12 +228,46 @@
     roi = null; dragRect = null; setMode("view");
 
     stopCamera();
+    hideMsg();
     video.classList.add("hidden");
     canvas.classList.remove("hidden");
+    startBtn.classList.add("hidden");
+    shutterBtn.classList.add("hidden");
     cameraControls.classList.add("hidden");
     resultControls.classList.remove("hidden");
 
     detectAndRender();
+  }
+
+  // ---- 撮影：今のカメラ映像を1枚取り込む ----
+  function capture() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) { showMsg("まだ映像が準備できていません。少し待ってからもう一度。"); return; }
+    setupFromSource(video, vw, vh);
+  }
+
+  // ---- 保存済みの写真ファイルを読み込む（EXIF回転も反映）----
+  async function loadFile(file) {
+    if (!file) return;
+    hideMsg();
+    try {
+      let src, sw, sh;
+      if (window.createImageBitmap) {
+        const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+        src = bmp; sw = bmp.width; sh = bmp.height;
+      } else {
+        const img = await new Promise((res, rej) => {
+          const im = new Image();
+          im.onload = () => res(im);
+          im.onerror = rej;
+          im.src = URL.createObjectURL(file);
+        });
+        src = img; sw = img.naturalWidth; sh = img.naturalHeight;
+      }
+      setupFromSource(src, sw, sh);
+    } catch (e) {
+      showMsg("この画像は読み込めませんでした（" + (e && e.name ? e.name : "エラー") + "）。別の写真でお試しください。");
+    }
   }
 
   function stopCamera() {
@@ -509,6 +546,12 @@
   // ---- ボタン ----
   startBtn.addEventListener("click", startCamera);
   shutterBtn.addEventListener("click", capture);
+  fileBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    loadFile(f);
+    fileInput.value = "";   // 同じ写真を再度選べるようにリセット
+  });
   resetBtn.addEventListener("click", () => { boxes.forEach(b => b.revealed = false); render(); });
   retakeBtn.addEventListener("click", () => {
     canvas.classList.add("hidden");
