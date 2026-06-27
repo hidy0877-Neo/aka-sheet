@@ -32,7 +32,6 @@
     padding: 12px;
     gap: 12px;
   }
-  /* カメラ映像・結果キャンバスの共通枠 */
   #stage {
     position: relative;
     width: 100%;
@@ -47,8 +46,7 @@
     background: #000;
     display: block;
   }
-  /* カスタムのピンチ/パン処理をするため、ブラウザ既定のジェスチャは無効化 */
-  canvas { touch-action: none; }
+  canvas { touch-action: none; }  /* 独自のピンチ/パンのため既定ジェスチャは無効化 */
 
   .controls {
     width: 100%;
@@ -71,9 +69,7 @@
   button:active { opacity: .75; }
   button.secondary { background: #3a3a3c; }
   button.active { background: #30d158; color: #000; }
-  button.shutter {
-    background: #fff; color: #000; font-size: 17px;
-  }
+  button.shutter { background: #fff; color: #000; font-size: 17px; }
 
   .slider-box {
     background: #2c2c2e;
@@ -105,36 +101,36 @@
 
   <div id="msg" class="hidden"></div>
 
-  <!-- 撮影前のコントロール -->
+  <!-- 撮影前 -->
   <div class="controls" id="cameraControls">
     <button id="startBtn">カメラを起動</button>
     <button id="shutterBtn" class="shutter hidden">● 撮影</button>
     <button id="fileBtn" class="secondary">保存した写真から選ぶ</button>
     <input id="fileInput" type="file" accept="image/*" class="hidden">
-    <p class="hint">背面カメラで撮るか、保存済みの写真を選んでください（赤・オレンジ・青のマーカー部分を隠します）</p>
+    <p class="hint">背面カメラで撮るか、保存済みの写真を選んでください</p>
   </div>
 
-  <!-- 撮影後のコントロール -->
+  <!-- 撮影後 -->
   <div class="controls hidden" id="resultControls">
     <div class="slider-box">
-      <label><span>検出する色の感度</span><span id="sensVal"></span></label>
+      <label><span>タップで拾う感度</span><span id="sensVal"></span></label>
       <input type="range" id="sensitivity" min="8" max="55" value="22">
-      <p class="hint">取りこぼす→左へ / 余計な所まで隠れる→右へ</p>
+      <p class="hint">マーカーを拾いにくい→左へ / 広がりすぎる→右へ</p>
     </div>
     <div class="row">
-      <button id="colRed" class="secondary">赤だけ</button>
-      <button id="colBlue" class="secondary">青だけ</button>
+      <button id="colRed" class="secondary">赤</button>
+      <button id="colBlue" class="secondary">青</button>
       <button id="colBoth" class="secondary active">両方</button>
     </div>
     <div class="row">
-      <button id="selectBtn" class="secondary">範囲を選択</button>
-      <button id="clearRoiBtn" class="secondary">範囲をクリア</button>
+      <button id="undoBtn" class="secondary">ひとつ戻す</button>
+      <button id="clearBtn" class="secondary">全部消す</button>
     </div>
     <div class="row">
       <button id="resetBtn" class="secondary">全部隠す</button>
       <button id="retakeBtn" class="secondary">撮り直し</button>
     </div>
-    <p class="hint" id="resultHint">タップ→開閉 ／ 2本指でズーム ／ ダブルタップで等倍</p>
+    <p class="hint" id="resultHint">マーカーをタップで隠す ／ 隠れた所をタップで確認 ／ 2本指ズーム・ダブルタップで等倍</p>
   </div>
 </main>
 
@@ -155,32 +151,30 @@
   const fileInput   = document.getElementById("fileInput");
   const resetBtn    = document.getElementById("resetBtn");
   const retakeBtn   = document.getElementById("retakeBtn");
-  const selectBtn   = document.getElementById("selectBtn");
-  const clearRoiBtn = document.getElementById("clearRoiBtn");
+  const undoBtn     = document.getElementById("undoBtn");
+  const clearBtn    = document.getElementById("clearBtn");
   const colRed      = document.getElementById("colRed");
   const colBlue     = document.getElementById("colBlue");
   const colBoth     = document.getElementById("colBoth");
   const sensitivity = document.getElementById("sensitivity");
   const sensVal     = document.getElementById("sensVal");
-  const resultHint  = document.getElementById("resultHint");
 
   let stream = null;
-  let baseCanvas = null;      // 撮影画像を保持するオフスクリーンキャンバス
-  let baseImageData = null;   // 検出用の画素データ
-  let boxes = [];             // 検出したブロック [{x,y,w,h,revealed}]
-  let roi = null;             // 検出範囲 {x,y,w,h}（null なら画像全体）
-  let colorMode = "both";     // 検出する色 "both" | "red" | "blue"
-  let mode = "view";          // "view"（閲覧・ズーム） | "select"（範囲選択）
-  let dragRect = null;        // 範囲選択中のプレビュー矩形
-  const view = { scale: 1, tx: 0, ty: 0 };  // 画像座標→キャンバス座標の変換
-  const MAX_DIM = 1100;       // 処理する最大解像度
-  const MIN_PIXELS = 8;       // ノイズ除去
+  let baseCanvas = null;       // 撮影画像
+  let baseImageData = null;    // 検出用画素
+  let markerMask = null;       // マーカー画素マスク（全画面ぶん）
+  let mw = 0, mh = 0;          // マスクの幅・高さ
+  let boxes = [];              // タップで隠したブロック [{x,y,w,h,revealed}]
+  let colorMode = "both";      // "both" | "red" | "blue"
+  const view = { scale: 1, tx: 0, ty: 0 };
+  const MAX_DIM = 1100;
+  const DILATE_R = 2;          // マスクの膨張量
+  const TAP_SEARCH = 16;       // タップ位置の近くでマーカーを探す半径(px)
   const MAX_ZOOM = 6;
 
-  // ポインタ操作（タップ/パン/ピンチ/範囲選択）の状態
   const pointers = new Map();
   let panLast = null, pinchStartDist = 0, pinchStartScale = 1, pinchAnchor = null;
-  let moved = false, selectStart = null, lastTap = 0;
+  let moved = false, lastTap = 0;
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   function showMsg(text){ msg.textContent = text; msg.classList.remove("hidden"); }
@@ -196,8 +190,7 @@
     }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
-        audio: false
+        video: { facingMode: { ideal: "environment" } }, audio: false
       });
       video.srcObject = stream;
       await video.play();
@@ -219,10 +212,9 @@
     }
   }
 
-  // ---- 画像ソース（カメラ映像 or 読み込んだ画像）を取り込んで結果画面へ ----
+  // ---- 画像ソースを取り込み結果画面へ ----
   function setupFromSource(src, sw, sh) {
     if (!sw || !sh) { showMsg("画像を読み込めませんでした。別の写真でお試しください。"); return; }
-
     const s = Math.min(1, MAX_DIM / Math.max(sw, sh));
     const w = Math.round(sw * s), h = Math.round(sh * s);
 
@@ -234,7 +226,7 @@
 
     canvas.width = w; canvas.height = h;
     view.scale = 1; view.tx = 0; view.ty = 0;
-    roi = null; dragRect = null; setMode("view");
+    boxes = [];
 
     stopCamera();
     hideMsg();
@@ -245,17 +237,15 @@
     cameraControls.classList.add("hidden");
     resultControls.classList.remove("hidden");
 
-    detectAndRender();
+    computeMask();
   }
 
-  // ---- 撮影：今のカメラ映像を1枚取り込む ----
   function capture() {
     const vw = video.videoWidth, vh = video.videoHeight;
     if (!vw || !vh) { showMsg("まだ映像が準備できていません。少し待ってからもう一度。"); return; }
     setupFromSource(video, vw, vh);
   }
 
-  // ---- 保存済みの写真ファイルを読み込む（EXIF回転も反映）----
   async function loadFile(file) {
     if (!file) return;
     hideMsg();
@@ -267,8 +257,7 @@
       } else {
         const img = await new Promise((res, rej) => {
           const im = new Image();
-          im.onload = () => res(im);
-          im.onerror = rej;
+          im.onload = () => res(im); im.onerror = rej;
           im.src = URL.createObjectURL(file);
         });
         src = img; sw = img.naturalWidth; sh = img.naturalHeight;
@@ -283,15 +272,13 @@
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
   }
 
-  // ---- マーカー画素の判定（HSV方式）----
-  // 赤〜オレンジ、または青マーカーの色相帯を拾う。
-  // 彩度・明度が低い画素（紙・黒文字・影）と、青緑(シアン=見出し帯)は除外する。
+  // ---- マーカー画素の判定（HSV）----
   function isTarget(r, g, b, satMin) {
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
     const v = max / 255;
-    if (v < 0.18) return false;                   // 暗すぎ（黒・濃い影）は除外
+    if (v < 0.18) return false;
     const delta = max - min;
-    if (delta === 0) return false;                // 無彩色は除外
+    if (delta === 0) return false;
     const sat = delta / max;
     let h;
     if (max === r)      h = 60 * (((g - b) / delta) % 6);
@@ -299,66 +286,18 @@
     else                h = 60 * ((r - g) / delta + 4);
     if (h < 0) h += 360;
 
-    const isRed  = (h <= 45 || h >= 335);         // 赤〜オレンジ
-    const isBlue = (h >= 178 && h <= 260);        // 青〜水色（シアン寄り・青紫寄りも拾う）
-    // 水色マーカーは淡いことが多いので、青は彩度しきい値を緩める
-    const blueSat = satMin * 0.6;
+    const isRed  = (h <= 45 || h >= 335);          // 赤〜オレンジ
+    const isBlue = (h >= 178 && h <= 260);         // 青〜水色
+    const blueSat = satMin * 0.6;                  // 水色は淡いので緩める
 
     if (colorMode === "red")  return isRed && sat >= satMin;
     if (colorMode === "blue") return isBlue && sat >= blueSat;
-    // both
     if (isRed && sat >= satMin) return true;
     if (isBlue && sat >= blueSat) return true;
     return false;
   }
 
-  // ---- 近い矩形をグループ化（Union-Find）----
-  function groupRects(rects, w, h) {
-    const n = rects.length;
-    if (n === 0) return [];
-    const hs = rects.map(r => r.h).sort((a, b) => a - b);
-    const medH = hs[Math.floor(n / 2)] || 8;
-    const mx = medH * 0.9;                          // 横は単語内の文字間をつなぐ
-    const my = medH * 0.45;                         // 縦は別の行をまたがない程度
-
-    const parent = new Int32Array(n);
-    for (let i = 0; i < n; i++) parent[i] = i;
-    const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
-    const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[a] = b; };
-
-    for (let i = 0; i < n; i++) {
-      const a = rects[i];
-      const ax1 = a.x - mx, ay1 = a.y - my, ax2 = a.x + a.w + mx, ay2 = a.y + a.h + my;
-      for (let j = i + 1; j < n; j++) {
-        const b = rects[j];
-        if (ax1 < b.x + b.w && ax2 > b.x && ay1 < b.y + b.h && ay2 > b.y) union(i, j);
-      }
-    }
-
-    const groups = new Map();
-    for (let i = 0; i < n; i++) {
-      const root = find(i), r = rects[i];
-      const g = groups.get(root);
-      if (!g) groups.set(root, { x: r.x, y: r.y, x2: r.x + r.w, y2: r.y + r.h });
-      else {
-        if (r.x < g.x) g.x = r.x;
-        if (r.y < g.y) g.y = r.y;
-        if (r.x + r.w > g.x2) g.x2 = r.x + r.w;
-        if (r.y + r.h > g.y2) g.y2 = r.y + r.h;
-      }
-    }
-
-    const pad = 3;
-    return [...groups.values()].map(g => ({
-      x: Math.max(0, g.x - pad),
-      y: Math.max(0, g.y - pad),
-      w: Math.min(w, g.x2 + pad) - Math.max(0, g.x - pad),
-      h: Math.min(h, g.y2 + pad) - Math.max(0, g.y - pad)
-    }));
-  }
-
-  // ---- マスクを膨張させる（分断をつなぎ、フチの取りこぼしを覆う）----
-  // 半径 r の四角形で膨張。横→縦の分離処理で高速。
+  // ---- マスク膨張（分断をつなぎフチを覆う）----
   function dilate(src, w, h, r) {
     if (r <= 0) return src;
     const tmp = new Uint8Array(w * h);
@@ -383,91 +322,79 @@
     return out;
   }
 
-  // ---- 検出 → 矩形抽出 → 描画 ----
-  function detectAndRender() {
+  // ---- マーカーマスクを計算（タップ判定の素材。ブロックは作らない）----
+  function computeMask() {
     if (!baseImageData) return;
     const t = Number(sensitivity.value);
     sensVal.textContent = t;
     const satMin = t / 100;
-
     const { width: w, height: h, data } = baseImageData;
-    let mask = new Uint8Array(w * h);
-
-    // 検出範囲（roi があればその中だけ走査）
-    let x0 = 0, y0 = 0, x1 = w, y1 = h;
-    if (roi) {
-      x0 = clamp(Math.floor(roi.x), 0, w); y0 = clamp(Math.floor(roi.y), 0, h);
-      x1 = clamp(Math.ceil(roi.x + roi.w), 0, w); y1 = clamp(Math.ceil(roi.y + roi.h), 0, h);
+    let m = new Uint8Array(w * h);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      if (isTarget(data[i], data[i + 1], data[i + 2], satMin)) m[p] = 1;
     }
-    for (let y = y0; y < y1; y++) {
-      for (let x = x0; x < x1; x++) {
-        const p = y * w + x, i = p * 4;
-        if (isTarget(data[i], data[i + 1], data[i + 2], satMin)) mask[p] = 1;
-      }
-    }
-
-    // 膨張で分断をつなぎ、マーカーのフチの取りこぼしを覆う
-    mask = dilate(mask, w, h, 2);
-
-    // 連結成分ラベリング → 生の矩形
-    const visited = new Uint8Array(w * h);
-    const stack = new Int32Array(w * h);
-    const maxArea = w * h * 0.03;
-    const rects = [];
-    for (let p = 0; p < mask.length; p++) {
-      if (!mask[p] || visited[p]) continue;
-      let sp = 0; stack[sp++] = p; visited[p] = 1;
-      let minX = w, minY = h, maxX = 0, maxY = 0, count = 0;
-      while (sp > 0) {
-        const cur = stack[--sp];
-        const cx = cur % w, cy = (cur - cx) / w;
-        if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
-        if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
-        count++;
-        if (cx > 0     && mask[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; stack[sp++] = cur - 1; }
-        if (cx < w - 1 && mask[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; stack[sp++] = cur + 1; }
-        if (cy > 0     && mask[cur - w] && !visited[cur - w]) { visited[cur - w] = 1; stack[sp++] = cur - w; }
-        if (cy < h - 1 && mask[cur + w] && !visited[cur + w]) { visited[cur + w] = 1; stack[sp++] = cur + w; }
-      }
-      if (count < MIN_PIXELS) continue;
-      const bw = maxX - minX + 1, bh = maxY - minY + 1;
-      if (bw * bh > maxArea) continue;
-      rects.push({ x: minX, y: minY, w: bw, h: bh });
-    }
-
-    boxes = groupRects(rects, w, h).map(r => ({ ...r, revealed: false }));
+    markerMask = dilate(m, w, h, DILATE_R);
+    mw = w; mh = h;
     render();
   }
 
-  // ---- 描画（ズーム/パンを反映）----
+  // ---- タップ地点のマーカーを塗りつぶし的に拾い、その外接矩形を返す ----
+  function floodFillAt(sx, sy) {
+    if (!markerMask) return null;
+    const w = mw, h = mh;
+    sx = Math.round(sx); sy = Math.round(sy);
+    let seed = -1;
+    if (sx >= 0 && sy >= 0 && sx < w && sy < h && markerMask[sy * w + sx]) {
+      seed = sy * w + sx;
+    } else {
+      // タップが少しずれても拾えるよう近傍を探索
+      let bestD = Infinity;
+      for (let dy = -TAP_SEARCH; dy <= TAP_SEARCH; dy++) {
+        const yy = sy + dy; if (yy < 0 || yy >= h) continue;
+        for (let dx = -TAP_SEARCH; dx <= TAP_SEARCH; dx++) {
+          const xx = sx + dx; if (xx < 0 || xx >= w) continue;
+          if (markerMask[yy * w + xx]) { const d = dx * dx + dy * dy; if (d < bestD) { bestD = d; seed = yy * w + xx; } }
+        }
+      }
+    }
+    if (seed < 0) return null;
+
+    const visited = new Uint8Array(w * h);
+    const stack = new Int32Array(w * h);
+    let sp = 0; stack[sp++] = seed; visited[seed] = 1;
+    let minX = w, minY = h, maxX = 0, maxY = 0;
+    while (sp > 0) {
+      const cur = stack[--sp];
+      const cx = cur % w, cy = (cur - cx) / w;
+      if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+      if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+      if (cx > 0     && markerMask[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; stack[sp++] = cur - 1; }
+      if (cx < w - 1 && markerMask[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; stack[sp++] = cur + 1; }
+      if (cy > 0     && markerMask[cur - w] && !visited[cur - w]) { visited[cur - w] = 1; stack[sp++] = cur - w; }
+      if (cy < h - 1 && markerMask[cur + w] && !visited[cur + w]) { visited[cur + w] = 1; stack[sp++] = cur + w; }
+    }
+    const pad = 2;
+    return {
+      x: Math.max(0, minX - pad), y: Math.max(0, minY - pad),
+      w: Math.min(w, maxX + pad) - Math.max(0, minX - pad),
+      h: Math.min(h, maxY + pad) - Math.max(0, minY - pad)
+    };
+  }
+
+  // ---- 描画 ----
   function render() {
     if (!baseCanvas) return;
     const w = canvas.width, h = canvas.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, w, h);
-
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
     ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
     ctx.drawImage(baseCanvas, 0, 0);
-
     ctx.fillStyle = "#2b2b2e";
     for (const b of boxes) { if (!b.revealed) ctx.fillRect(b.x, b.y, b.w, b.h); }
-
-    const lw = 2 / view.scale, dash = [8 / view.scale, 6 / view.scale];
-    if (roi) {
-      ctx.strokeStyle = "#0a84ff"; ctx.lineWidth = lw;
-      ctx.setLineDash(dash); ctx.strokeRect(roi.x, roi.y, roi.w, roi.h); ctx.setLineDash([]);
-    }
-    if (dragRect) {
-      ctx.fillStyle = "rgba(48,209,88,0.15)";
-      ctx.fillRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h);
-      ctx.strokeStyle = "#30d158"; ctx.lineWidth = lw;
-      ctx.setLineDash(dash); ctx.strokeRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h); ctx.setLineDash([]);
-    }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
-  // ---- 座標変換ヘルパー ----
+  // ---- 座標変換 ----
   function clientToCanvas(cx, cy) {
     const r = canvas.getBoundingClientRect();
     return { x: (cx - r.left) * (canvas.width / r.width), y: (cy - r.top) * (canvas.height / r.height) };
@@ -476,28 +403,12 @@
     const c = clientToCanvas(cx, cy);
     return { x: (c.x - view.tx) / view.scale, y: (c.y - view.ty) / view.scale };
   }
-  function normRect(a, b) {
-    return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) };
-  }
   function clampPan() {
     const w = canvas.width, h = canvas.height;
     view.tx = clamp(view.tx, w - w * view.scale, 0);
     view.ty = clamp(view.ty, h - h * view.scale, 0);
   }
   function resetZoom() { view.scale = 1; view.tx = 0; view.ty = 0; render(); }
-
-  function setMode(m) {
-    mode = m;
-    if (m === "select") {
-      selectBtn.textContent = "範囲選択中…";
-      selectBtn.classList.add("active");
-      resultHint.textContent = "指でドラッグして、隠したい範囲を囲んでください";
-    } else {
-      selectBtn.textContent = "範囲を選択";
-      selectBtn.classList.remove("active");
-      resultHint.textContent = "タップ→開閉 ／ 2本指でズーム ／ ダブルタップで等倍";
-    }
-  }
 
   // ---- ポインタ操作 ----
   canvas.addEventListener("pointerdown", (e) => {
@@ -509,19 +420,15 @@
       pinchStartDist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
       pinchStartScale = view.scale;
       pinchAnchor = toImg((a.x + b.x) / 2, (a.y + b.y) / 2);
-      dragRect = null;
     } else if (pointers.size === 1) {
       panLast = { x: e.clientX, y: e.clientY };
-      if (mode === "select") { selectStart = toImg(e.clientX, e.clientY); dragRect = null; }
     }
   });
 
   canvas.addEventListener("pointermove", (e) => {
     if (!pointers.has(e.pointerId)) return;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
     if (pointers.size >= 2) {
-      // ピンチでズーム（2本指の中点を固定して拡大縮小）
       const [a, b] = [...pointers.values()];
       const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
       view.scale = clamp(pinchStartScale * d / pinchStartDist, 1, MAX_ZOOM);
@@ -530,17 +437,12 @@
       view.ty = cc.y - pinchAnchor.y * view.scale;
       clampPan(); moved = true; render();
     } else if (pointers.size === 1) {
-      if (mode === "select") {
-        dragRect = normRect(selectStart, toImg(e.clientX, e.clientY));
-        moved = true; render();
-      } else {
-        const dx = e.clientX - panLast.x, dy = e.clientY - panLast.y;
-        if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
-        const k = canvas.width / canvas.getBoundingClientRect().width;
-        view.tx += dx * k; view.ty += dy * k;
-        panLast = { x: e.clientX, y: e.clientY };
-        clampPan(); render();
-      }
+      const dx = e.clientX - panLast.x, dy = e.clientY - panLast.y;
+      if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+      const k = canvas.width / canvas.getBoundingClientRect().width;
+      view.tx += dx * k; view.ty += dy * k;
+      panLast = { x: e.clientX, y: e.clientY };
+      clampPan(); render();
     }
   });
 
@@ -549,19 +451,9 @@
     const sizeBefore = pointers.size;
     const p = pointers.get(e.pointerId);
     pointers.delete(e.pointerId);
-
-    // ピンチ後に1本残ったら、その指をパンの基準にする（タップ誤発火も防ぐ）
     if (pointers.size === 1) {
       const r = [...pointers.values()][0];
       panLast = { x: r.x, y: r.y }; moved = true;
-      return;
-    }
-    if (mode === "select" && sizeBefore === 1) {
-      if (dragRect && dragRect.w > 6 && dragRect.h > 6) {
-        roi = { ...dragRect }; dragRect = null; setMode("view"); detectAndRender();
-      } else {
-        dragRect = null; setMode("view"); render();
-      }
       return;
     }
     if (sizeBefore === 1 && !moved) handleTap(p.x, p.y);
@@ -569,7 +461,8 @@
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
 
-  // ---- タップ：ダブルタップで等倍 / 単タップで一番近いブロックを開閉 ----
+  // ---- タップ処理 ----
+  // ダブルタップ=等倍 / 隠れたブロック上=めくる / マーカー上=新たに隠す
   function handleTap(cx, cy) {
     const now = Date.now();
     if (now - lastTap < 300) { lastTap = 0; resetZoom(); return; }
@@ -577,7 +470,9 @@
 
     const pt = toImg(cx, cy);
     const r = canvas.getBoundingClientRect();
-    const tol = 20 * (canvas.width / r.width) / view.scale;  // 画面上で約20px
+    const tol = 16 * (canvas.width / r.width) / view.scale;
+
+    // すでに隠したブロックに当たれば、めくる／隠すをトグル
     let hit = -1, best = Infinity;
     for (let i = 0; i < boxes.length; i++) {
       const b = boxes[i];
@@ -586,7 +481,18 @@
       const d = Math.hypot(dx, dy);
       if (d < best) { best = d; hit = i; }
     }
-    if (hit >= 0 && best <= tol) { boxes[hit].revealed = !boxes[hit].revealed; render(); }
+    if (hit >= 0 && best <= tol) {
+      boxes[hit].revealed = !boxes[hit].revealed;
+      render();
+      return;
+    }
+
+    // それ以外はマーカーを拾って新しく隠す
+    const bb = floodFillAt(pt.x, pt.y);
+    if (bb && bb.w > 2 && bb.h > 2) {
+      boxes.push({ ...bb, revealed: false });
+      render();
+    }
   }
 
   // ---- ボタン ----
@@ -596,31 +502,31 @@
   fileInput.addEventListener("change", (e) => {
     const f = e.target.files && e.target.files[0];
     loadFile(f);
-    fileInput.value = "";   // 同じ写真を再度選べるようにリセット
+    fileInput.value = "";
   });
   resetBtn.addEventListener("click", () => { boxes.forEach(b => b.revealed = false); render(); });
+  undoBtn.addEventListener("click", () => { boxes.pop(); render(); });
+  clearBtn.addEventListener("click", () => { boxes = []; render(); });
   retakeBtn.addEventListener("click", () => {
     canvas.classList.add("hidden");
     video.classList.remove("hidden");
     resultControls.classList.add("hidden");
     cameraControls.classList.remove("hidden");
-    roi = null; dragRect = null; setMode("view");
+    boxes = []; markerMask = null;
     startCamera();
   });
-  selectBtn.addEventListener("click", () => { setMode(mode === "select" ? "view" : "select"); render(); });
-  clearRoiBtn.addEventListener("click", () => { roi = null; detectAndRender(); });
 
   function setColorMode(m) {
     colorMode = m;
     colRed.classList.toggle("active", m === "red");
     colBlue.classList.toggle("active", m === "blue");
     colBoth.classList.toggle("active", m === "both");
-    detectAndRender();
+    computeMask();   // 拾える色が変わるのでマスク再計算（既存の隠しブロックは保持）
   }
   colRed.addEventListener("click", () => setColorMode("red"));
   colBlue.addEventListener("click", () => setColorMode("blue"));
   colBoth.addEventListener("click", () => setColorMode("both"));
-  sensitivity.addEventListener("input", detectAndRender);
+  sensitivity.addEventListener("input", computeMask);
 
   sensVal.textContent = sensitivity.value;
 })();
